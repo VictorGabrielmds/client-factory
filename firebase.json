@@ -1,0 +1,14 @@
+{
+  "hosting": {
+    "target": "app-cliente",
+    "source": ".",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "frameworksBackend": {
+      "region": "southamerica-east1"
+    }
+  }
+}

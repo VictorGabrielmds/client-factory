@@ -36,6 +36,25 @@ yarn-error.log*
 # vercel
 .vercel
 
+# firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# segredos e credenciais (nunca commitar)
+!.env.example
+*.key
+*.p12
+serviceAccount*.json
+*-service-account*.json
+*firebase-adminsdk*.json
+
+# claude code (configurações locais)
+.claude/settings.local.json
+
+# metadados gerados por editores de imagem/GIS
+*.aux.xml

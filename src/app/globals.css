@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-handwritten: var(--font-caveat);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+.bg-color-primary{
+  background-color: #222222 !important;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  /* Stack "system UI" — em dispositivo Apple isso É a San Francisco de
+     verdade (não dá pra embutir a fonte da Apple na web por licença); em
+     outras plataformas cai na fonte nativa de cada uma, sempre parecendo
+     um app, nunca uma página web genérica. */
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Esconde a barra de rolagem das fileiras de chips/horários horizontais,
+   sem tirar a rolagem em si — visual mais limpo, estilo apps nativos. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* O formulário do agendamento rola sem levar o cabeçalho junto.
+   A barra nativa fica invisível para não escapar da curva do modal. */
+.agendar-fritura-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.agendar-fritura-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* ─── LANDING (/) — faixa de produtos correndo, tipo letreiro de fábrica ─── */
+@keyframes marquee-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+.marquee-track {
+  animation: marquee-scroll 75s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marquee-track {
+    animation: none;
+  }
+}
+
+/* Ruído sutil — textura de papel/estamparia por trás do hero escuro,
+   sem precisar de nenhuma imagem externa. */
+.grain-overlay {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  background-size: 160px 160px;
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.fade-up-in {
+  animation: fade-up 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
