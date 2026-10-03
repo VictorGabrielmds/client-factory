@@ -18,10 +18,18 @@ import { useProdutos } from "../hooks/useProdutos";
 import type { Produto } from "../types/produto";
 import { useFreteCheckout } from "../hooks/useFreteCheckout";
 import { mensagemFalhaCheckout } from "../lib/checkoutFeedback";
+import { carregarComInsistencia, comRetentativa } from "../lib/rede";
 
 const CHAVE_STORAGE = "fabrica_carrinho";
 const CHAVE_CHECKOUT_PENDENTE = "fabrica_checkout_pendente_v2";
 const VALIDADE_CHECKOUT_PENDENTE_MS = 48 * 60 * 60 * 1000;
+
+// Timeouts das chamadas do checkout. O padrão do SDK é 70s por chamada: numa
+// rede ruim, 3 tentativas deixavam o botão em "Finalizando..." por mais de
+// 3 minutos. Como criarPedido é idempotente (mesma chave em toda tentativa),
+// cortar antes e tentar de novo nunca cria pedido duplicado.
+const TIMEOUT_CRIAR_PEDIDO_MS = 35000;
+const TIMEOUT_CONSULTA_MS = 15000;
 
 // Colchão de tempo entre escolher um horário e apertar "Finalizar" — sem
 // isso, o primeiro horário da lista pode deixar de valer só pelo tempo que
@@ -344,6 +352,16 @@ const esperar = (ms: number) => new Promise((resolve) => window.setTimeout(resol
 interface CarrinhoContextValue {
   produtos: Produto[];
   produtosLoading: boolean;
+  produtosErro: boolean;
+  // false até o carrinho salvo neste aparelho ser lido — evita mostrar
+  // "carrinho vazio" por um instante (ou enquanto o cardápio carrega numa
+  // rede lenta) para quem tem itens salvos.
+  carrinhoRestaurado: boolean;
+  quantidadeItensSalvos: number;
+  // Pedido que foi criado numa tentativa anterior cuja resposta se perdeu
+  // (internet caiu, página recarregada). Descoberto ao abrir o app.
+  pedidoRecuperado: string | null;
+  descartarPedidoRecuperado: () => void;
 
   itens: ItemCarrinho[];
   totalItens: number;
@@ -371,6 +389,7 @@ interface CarrinhoContextValue {
 
   horarioFuncionamento: ConfiguracaoHorario | null;
   horarioCarregando: boolean;
+  horarioErro: boolean;
   slotsDisponiveis: SlotAgendamento[];
   agendamento: SlotAgendamento | null;
   definirAgendamento: (slot: SlotAgendamento) => void;
@@ -395,6 +414,7 @@ interface CarrinhoContextValue {
 
   historicoPedidos: HistoricoPedidoResumo[];
   historicoPedidosCarregando: boolean;
+  historicoPedidosErro: boolean;
   carregarHistoricoPedidos: () => Promise<void>;
 
   adicionar: (produtoId: string) => void;
@@ -427,7 +447,7 @@ interface CarrinhoContextValue {
 const CarrinhoContext = createContext<CarrinhoContextValue | null>(null);
 
 export function CarrinhoProvider({ children }: { children: ReactNode }) {
-  const { produtos, loading: produtosLoading } = useProdutos();
+  const { produtos, loading: produtosLoading, erro: produtosErro } = useProdutos();
   const { user } = useAuth();
 
   const [quantidades, setQuantidades] = useState<Record<string, number>>({});
@@ -447,6 +467,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
 
   const [horarioFuncionamento, setHorarioFuncionamento] = useState<ConfiguracaoHorario | null>(null);
   const [horarioCarregando, setHorarioCarregando] = useState(true);
+  const [horarioErro, setHorarioErro] = useState(false);
   const [agendamento, setAgendamento] = useState<SlotAgendamento | null>(null);
   const [ordemCategorias, setOrdemCategorias] = useState<string[]>([]);
   const [descricoesCategorias, setDescricoesCategorias] = useState<Record<string, string>>({});
@@ -467,7 +488,10 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
 
   const [historicoPedidos, setHistoricoPedidos] = useState<HistoricoPedidoResumo[]>([]);
   const [historicoPedidosCarregando, setHistoricoPedidosCarregando] = useState(false);
-  const historicoPedidosCarregado = useRef(false);
+  const [historicoPedidosErro, setHistoricoPedidosErro] = useState(false);
+  // uid cujo histórico já está carregado — trocar de conta no mesmo aparelho
+  // não pode continuar mostrando os pedidos da conta anterior.
+  const historicoPedidosCarregado = useRef<string | null>(null);
 
   const [cupomAplicado, setCupomAplicado] = useState<CupomAplicado | null>(null);
   const [cupomValidando, setCupomValidando] = useState(false);
@@ -478,6 +502,8 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
   const [formaPagamento, setFormaPagamento] = useState<FormaPagamento | null>(null);
   const [finalizando, setFinalizando] = useState(false);
   const [erroFinalizar, setErroFinalizar] = useState<string | null>(null);
+  const [pedidoRecuperado, setPedidoRecuperado] = useState<string | null>(null);
+  const [carrinhoRestaurado, setCarrinhoRestaurado] = useState(false);
 
   // Fallback em memória para navegadores que bloqueiam localStorage. No fluxo
   // normal a tentativa completa também fica persistida, então fechar/reabrir
@@ -521,7 +547,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
     }
     if (perfilCarregadoParaUidRef.current === user.uid) return;
     perfilCarregadoParaUidRef.current = user.uid;
-    getDoc(doc(db, "clientes", user.uid))
+    comRetentativa(() => getDoc(doc(db, "clientes", user.uid)))
       .then((snap) => {
         const dados = snap.data();
         if (dados?.nome && !nomeDigitadoNoCheckoutRef.current) setNome(dados.nome);
@@ -543,7 +569,9 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
         if (Array.isArray(dados?.enderecos)) setEnderecosSalvos(dados.enderecos);
       })
       .catch(() => {
-        // Sem perfil salvo ou leitura falhou — os campos só ficam vazios, sem quebrar a página.
+        // Sem perfil salvo ou leitura falhou — os campos só ficam vazios, sem
+        // quebrar a página. Libera para tentar de novo na próxima troca de user.
+        if (perfilCarregadoParaUidRef.current === user.uid) perfilCarregadoParaUidRef.current = null;
       });
   }, [user]);
 
@@ -551,10 +579,21 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
   // alteração" (ver Cardapio.tsx). Regras já permitem essa consulta direta
   // (pedidos/{id}: allow read se resource.data.clienteUid == uid), sem
   // precisar de uma Cloud Function só pra isso.
-  const ultimoPedidoCarregado = useRef(false);
+  const ultimoPedidoCarregado = useRef<string | null>(null);
   useEffect(() => {
-    if (!user || ultimoPedidoCarregado.current) return;
-    ultimoPedidoCarregado.current = true;
+    if (!user) {
+      if (ultimoPedidoCarregado.current) {
+        // Saiu da conta: não deixa o último pedido/histórico da conta
+        // anterior aparecendo para quem entrar depois neste aparelho.
+        ultimoPedidoCarregado.current = null;
+        historicoPedidosCarregado.current = null;
+        setUltimoPedido(null);
+        setHistoricoPedidos([]);
+      }
+      return;
+    }
+    if (ultimoPedidoCarregado.current === user.uid) return;
+    ultimoPedidoCarregado.current = user.uid;
     setUltimoPedidoCarregando(true);
     const q = query(
       collection(db, "pedidos"),
@@ -562,7 +601,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       orderBy("criadoEmTimestamp", "desc"),
       limit(1)
     );
-    getDocs(q)
+    comRetentativa(() => getDocs(q))
       .then((snap) => {
         if (snap.empty) return;
         const pedidoDoc = snap.docs[0];
@@ -580,6 +619,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       .catch((err) => {
         // Sem pedido anterior/erro de rede — "repetir" e "solicitar alteração" só ficam sem aparecer.
         console.error("Erro ao buscar último pedido:", err);
+        if (ultimoPedidoCarregado.current === user.uid) ultimoPedidoCarregado.current = null;
       })
       .finally(() => setUltimoPedidoCarregando(false));
   }, [user]);
@@ -589,56 +629,59 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
   // inteiro, incluindo "aberto agora", antes de se cadastrar — login só é
   // pedido no "Finalizar pedido"). É só a base pra montar os horários
   // agendáveis no carrinho; criarPedido confere tudo de novo no servidor.
-  const horarioCarregado = useRef(false);
+  //
+  // Numa rede ruim essa busca falhava UMA vez e o checkout ficava para
+  // sempre em "Nenhum horário disponível" até recarregar a página — agora
+  // tenta de novo sozinho (e na hora em que a internet volta).
   useEffect(() => {
-    if (horarioCarregado.current) return;
-    horarioCarregado.current = true;
     const consultar = httpsCallable<Record<string, never>, { horario: ConfiguracaoHorario }>(
       functions,
-      "consultarHorarioFuncionamento"
+      "consultarHorarioFuncionamento",
+      { timeout: TIMEOUT_CONSULTA_MS }
     );
-    consultar({})
-      .then((resultado) => setHorarioFuncionamento(resultado.data.horario))
-      .catch((err) => {
-        // Sem horário configurado/erro de rede — o carrinho fica sem slots
-        // pra agendar (o cliente não consegue finalizar, mas a página não quebra).
+    return carregarComInsistencia(
+      () => consultar({}),
+      (resultado) => {
+        setHorarioFuncionamento(resultado.data.horario);
+        setHorarioErro(false);
+        setHorarioCarregando(false);
+      },
+      (err) => {
         // Logado (não silencioso) porque uma falha aqui é sistêmica, não
         // "esperada" como cupom inválido — ex.: App Check mal configurado.
         console.error("consultarHorarioFuncionamento falhou:", err);
-      })
-      .finally(() => setHorarioCarregando(false));
+        setHorarioErro(true);
+        setHorarioCarregando(false);
+      }
+    );
   }, []);
 
   // Ordem das categorias definida no painel (configuracoes/categorias) —
   // categoria fora da lista cai no fim, em ordem alfabética entre si (ver
   // uso em Cardapio.tsx). Mesma lógica de "sem login" do horário acima.
-  const categoriasCarregadas = useRef(false);
   useEffect(() => {
-    if (categoriasCarregadas.current) return;
-    categoriasCarregadas.current = true;
     const consultar = httpsCallable<Record<string, never>, { ordem: string[]; descricoes: Record<string, string> }>(
       functions,
-      "consultarOrdemCategorias"
+      "consultarOrdemCategorias",
+      { timeout: TIMEOUT_CONSULTA_MS }
     );
-    consultar({})
-      .then((resultado) => {
+    return carregarComInsistencia(
+      () => consultar({}),
+      (resultado) => {
         setOrdemCategorias(resultado.data.ordem);
         setDescricoesCategorias(resultado.data.descricoes ?? {});
-      })
-      .catch((err) => {
-        // Sem ordem configurada/erro de rede — Cardapio.tsx cai pra ordem alfabética e sem textos de seção.
-        // Logado por ser uma falha sistêmica, não um estado normal de negócio.
+      },
+      (err) => {
+        // Enquanto não carrega, Cardapio.tsx usa ordem alfabética e sem textos de seção.
         console.error("consultarOrdemCategorias falhou:", err);
-      });
+      }
+    );
   }, []);
 
   // Taxa de cartão (débito/crédito), tempo de preparo padrão e WhatsApp da
   // loja (configuracoes/geral) — buscados uma vez, mesma lógica "sem login"
   // de horário/categorias acima.
-  const configGeralCarregada = useRef(false);
   useEffect(() => {
-    if (configGeralCarregada.current) return;
-    configGeralCarregada.current = true;
     const consultar = httpsCallable<
       Record<string, never>,
       {
@@ -650,9 +693,10 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
         enderecoLojaTexto: string;
         enderecoLojaLink: string;
       }
-    >(functions, "consultarConfiguracoesGerais");
-    consultar({})
-      .then((resultado) => {
+    >(functions, "consultarConfiguracoesGerais", { timeout: TIMEOUT_CONSULTA_MS });
+    return carregarComInsistencia(
+      () => consultar({}),
+      (resultado) => {
         setTaxaDebitoPercentual(resultado.data.taxaDebitoPercentual);
         setTaxaCreditoPercentual(resultado.data.taxaCreditoPercentual);
         setWhatsappLoja(resultado.data.whatsappLoja);
@@ -660,12 +704,13 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
         setValorMinimoEntrega(resultado.data.valorMinimoEntrega);
         setEnderecoLojaTexto(resultado.data.enderecoLojaTexto);
         setEnderecoLojaLink(resultado.data.enderecoLojaLink);
-      })
-      .catch((err) => {
-        // Sem config/erro de rede — checkout segue sem taxa de cartão/tempo de
-        // preparo (nunca trava o fluxo) e "solicitar alteração" fica sem link de WhatsApp.
+      },
+      (err) => {
+        // Enquanto não carrega, checkout segue sem taxa de cartão/tempo de
+        // preparo (o servidor recalcula tudo) e sem link de WhatsApp.
         console.error("consultarConfiguracoesGerais falhou:", err);
-      });
+      }
+    );
   }, []);
 
   // Salva endereço/tipo de entrega no perfil ANTES de qualquer pedido (ex.:
@@ -767,9 +812,10 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
   // do "último pedido" (que já é eager pro card do cardápio). Mesma regra de
   // leitura (clienteUid == uid) já usada ali, só que sem limit(1).
   const carregarHistoricoPedidos = useCallback(async () => {
-    if (!user || historicoPedidosCarregado.current) return;
-    historicoPedidosCarregado.current = true;
+    if (!user || historicoPedidosCarregado.current === user.uid) return;
+    historicoPedidosCarregado.current = user.uid;
     setHistoricoPedidosCarregando(true);
+    setHistoricoPedidosErro(false);
     try {
       const q = query(
         collection(db, "pedidos"),
@@ -777,7 +823,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
         orderBy("criadoEmTimestamp", "desc"),
         limit(20)
       );
-      const snap = await getDocs(q);
+      const snap = await comRetentativa(() => getDocs(q));
       setHistoricoPedidos(
         snap.docs.map((d) => {
           const dados = d.data();
@@ -796,7 +842,10 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       );
     } catch (err) {
       console.error("Erro ao carregar histórico de pedidos:", err);
-      historicoPedidosCarregado.current = false; // permite tentar de novo
+      historicoPedidosCarregado.current = null; // permite tentar de novo
+      // Sem isso a tela mostrava "Nenhum pedido ainda" quando na verdade
+      // só a internet tinha falhado.
+      setHistoricoPedidosErro(true);
     } finally {
       setHistoricoPedidosCarregando(false);
     }
@@ -897,12 +946,23 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
     } catch {
       // localStorage indisponível/corrompido — carrinho começa vazio, sem quebrar a página.
     }
+    setCarrinhoRestaurado(true);
   }, []);
 
+  // Só grava depois de restaurar: antes, o primeiro render (ainda vazio)
+  // sobrescrevia o carrinho salvo, e no modo estrito do React (efeitos rodam
+  // duas vezes) a segunda leitura já encontrava o carrinho vazio.
+  // try/catch: Safari em aba privada / armazenamento cheio lança exceção no
+  // setItem, o que antes derrubava a página inteira.
   useEffect(() => {
+    if (!carrinhoRestaurado) return;
     const estado: EstadoPersistido = { quantidades, observacoes, cupomCodigo, tipoEntrega, endereco };
-    window.localStorage.setItem(CHAVE_STORAGE, JSON.stringify(estado));
-  }, [quantidades, observacoes, cupomCodigo, tipoEntrega, endereco]);
+    try {
+      window.localStorage.setItem(CHAVE_STORAGE, JSON.stringify(estado));
+    } catch {
+      // Sem storage: o carrinho continua funcionando em memória nesta aba.
+    }
+  }, [carrinhoRestaurado, quantidades, observacoes, cupomCodigo, tipoEntrega, endereco]);
 
   const definirQuantidade = useCallback((produtoId: string, quantidade: number) => {
     setQuantidades((atual) => {
@@ -1061,18 +1121,98 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
   // Busca a lista de bairros cadastrados uma vez, só quando o cliente
   // realmente escolhe delivery — alimenta o autocomplete do campo de
   // bairro. Não é dado sensível (diferente de cupom), só nomes.
+  const precisaBairros = tipoEntrega === "delivery";
   useEffect(() => {
-    if (tipoEntrega !== "delivery" || bairrosCarregados.current) return;
-    bairrosCarregados.current = true;
-    const listar = httpsCallable<Record<string, never>, { bairros: string[] }>(functions, "listarBairrosEntrega");
-    listar({})
-      .then((resultado) => setBairrosEntrega(resultado.data.bairros))
-      .catch((err) => {
+    if (!precisaBairros || bairrosCarregados.current) return;
+    const listar = httpsCallable<Record<string, never>, { bairros: string[] }>(functions, "listarBairrosEntrega", {
+      timeout: TIMEOUT_CONSULTA_MS,
+    });
+    return carregarComInsistencia(
+      () => listar({}),
+      (resultado) => {
+        bairrosCarregados.current = true;
+        setBairrosEntrega(resultado.data.bairros);
+      },
+      (err) => {
         // Falha ao listar não impede o checkout — o campo só fica sem sugestões.
-        // Logado por ser uma falha sistêmica, não um estado normal de negócio.
         console.error("listarBairrosEntrega falhou:", err);
+      }
+    );
+  }, [precisaBairros]);
+
+  // Depois que um pedido é confirmado (agora ou recuperado de uma tentativa
+  // anterior), a próxima finalização é uma compra nova: troca a chave e limpa
+  // o carrinho (mas não nome/cpf/endereço, úteis pro próximo pedido). O
+  // horário escolhido também não é levado pro próximo pedido.
+  const concluirCheckout = useCallback(() => {
+    limparCheckoutPendente();
+    checkoutPendenteRef.current = null;
+    setQuantidades({});
+    setObservacoes("");
+    setCupomCodigo("");
+    setCupomAplicado(null);
+    setAgendamento(null);
+    setHorarioExpirou(false);
+  }, []);
+
+  const consultarCheckout = useCallback(async (idempotencyKey: string) => {
+    const consultar = httpsCallable<
+      { idempotencyKey: string },
+      { estado: string; resultado?: ResultadoCheckout }
+    >(functions, "consultarCheckoutPedido", { timeout: TIMEOUT_CONSULTA_MS });
+    const status = await comRetentativa(() => consultar({ idempotencyKey }));
+    return status.data;
+  }, []);
+
+  // Ao abrir o app (ou entrar na conta), confere se ficou alguma tentativa
+  // de pedido sem resposta — ex.: a internet caiu bem na hora de finalizar e
+  // a pessoa recarregou a página. Se o pedido chegou a ser criado, avisa e
+  // leva pra ele, em vez de deixar o carrinho cheio e a pessoa pedir de novo.
+  const recuperacaoFeitaParaUid = useRef<string | null>(null);
+  const quantidadesRef = useRef(quantidades);
+  useEffect(() => {
+    quantidadesRef.current = quantidades;
+  }, [quantidades]);
+  useEffect(() => {
+    if (!user || !carrinhoRestaurado) return;
+    if (recuperacaoFeitaParaUid.current === user.uid) return;
+    recuperacaoFeitaParaUid.current = user.uid;
+    const tentativa = lerCheckoutPendente(user.uid);
+    if (!tentativa) return;
+    consultarCheckout(tentativa.idempotencyKey)
+      .then((dados) => {
+        // Uma finalização em andamento cuida da própria tentativa.
+        if (finalizandoRef.current) return;
+        if (dados.estado === "concluido" && dados.resultado?.orderId) {
+          // Só esvazia o carrinho se ele ainda for o mesmo do pedido criado
+          // — se a pessoa já mexeu nos itens, mantém o que ela montou.
+          const itensPendentes = tentativa.payload.itens;
+          const atuais = quantidadesRef.current;
+          const mesmoCarrinho =
+            itensPendentes.length === Object.keys(atuais).length &&
+            itensPendentes.every((item) => atuais[item.produtoId] === item.quantidade);
+          if (mesmoCarrinho) {
+            concluirCheckout();
+          } else {
+            limparCheckoutPendente();
+            checkoutPendenteRef.current = null;
+          }
+          setPedidoRecuperado(dados.resultado.orderId);
+        } else if (dados.estado === "falhou" || dados.estado === "nao_encontrado") {
+          limparCheckoutPendente();
+          checkoutPendenteRef.current = null;
+        }
+        // Outro estado (ainda processando): mantém a tentativa — o próximo
+        // "Finalizar" reenvia com a mesma chave e recebe o mesmo pedido.
+      })
+      .catch(() => {
+        // Sem rede agora: a tentativa continua salva e é conferida no próximo
+        // "Finalizar" (ou na próxima vez que o app abrir).
+        if (recuperacaoFeitaParaUid.current === user.uid) recuperacaoFeitaParaUid.current = null;
       });
-  }, [tipoEntrega]);
+  }, [user, carrinhoRestaurado, consultarCheckout, concluirCheckout]);
+
+  const descartarPedidoRecuperado = useCallback(() => setPedidoRecuperado(null), []);
 
   const finalizarPedido = useCallback(async () => {
     if (!user || !formaPagamento || itens.length === 0 || !agendamento) return null;
@@ -1110,23 +1250,12 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
         lerCheckoutPendente(user.uid);
 
       if (tentativa) {
-        const consultar = httpsCallable<
-          { idempotencyKey: string },
-          { estado: string; resultado?: ResultadoCheckout }
-        >(functions, "consultarCheckoutPedido");
-        const status = await consultar({ idempotencyKey: tentativa.idempotencyKey });
-        if (status.data.estado === "concluido" && status.data.resultado?.orderId) {
-          limparCheckoutPendente();
-          checkoutPendenteRef.current = null;
-          setQuantidades({});
-          setObservacoes("");
-          setCupomCodigo("");
-          setCupomAplicado(null);
-          setAgendamento(null);
-          setHorarioExpirou(false);
-          return { orderId: status.data.resultado.orderId };
+        const status = await consultarCheckout(tentativa.idempotencyKey);
+        if (status.estado === "concluido" && status.resultado?.orderId) {
+          concluirCheckout();
+          return { orderId: status.resultado.orderId };
         }
-        if (status.data.estado === "falhou" || status.data.estado === "nao_encontrado") {
+        if (status.estado === "falhou" || status.estado === "nao_encontrado") {
           limparCheckoutPendente();
           checkoutPendenteRef.current = null;
           tentativa = null;
@@ -1147,7 +1276,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       const chamar = httpsCallable<
         PayloadCheckout & { idempotencyKey: string },
         ResultadoCheckout
-      >(functions, "criarPedido");
+      >(functions, "criarPedido", { timeout: TIMEOUT_CRIAR_PEDIDO_MS });
 
       let resultado: Awaited<ReturnType<typeof chamar>> | null = null;
       let ultimoErro: unknown = null;
@@ -1168,21 +1297,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       }
       if (!resultado) throw ultimoErro;
 
-      // Pedido criado — a próxima finalização é uma compra nova, então
-      // troca a chave. Limpa o carrinho (mas não nome/cpf/endereço, úteis
-      // pro próximo pedido).
-      limparCheckoutPendente();
-      checkoutPendenteRef.current = null;
-      setQuantidades({});
-      setObservacoes("");
-      setCupomCodigo("");
-      setCupomAplicado(null);
-      // Não carrega o horário escolhido pro próximo pedido — o cliente
-      // escolhe de novo cada vez (endereço/tipo de entrega continuam
-      // salvos, só o agendamento é específico de cada compra).
-      setAgendamento(null);
-      setHorarioExpirou(false);
-
+      concluirCheckout();
       return { orderId: resultado.data.orderId };
     } catch (err) {
       setErroFinalizar(mensagemFalhaCheckout(err, !navigator.onLine));
@@ -1191,7 +1306,9 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       setFinalizando(false);
       finalizandoRef.current = false;
     }
-  }, [user, formaPagamento, itens, observacoes, cupomAplicado, nome, cpf, tipoEntrega, endereco, agendamento, taxaEntregaCarregando, taxaEntregaErro]);
+  }, [user, formaPagamento, itens, observacoes, cupomAplicado, nome, cpf, tipoEntrega, endereco, agendamento, taxaEntregaCarregando, taxaEntregaErro, consultarCheckout, concluirCheckout]);
+
+  const quantidadeItensSalvos = Object.keys(quantidades).length;
 
   // Memoizado: sem isso, o objeto era recriado em TODO render do provider
   // (que envolve o app inteiro em layout.tsx) — qualquer estado mudando em
@@ -1202,6 +1319,11 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
     () => ({
       produtos,
       produtosLoading,
+      produtosErro,
+      carrinhoRestaurado,
+      quantidadeItensSalvos,
+      pedidoRecuperado,
+      descartarPedidoRecuperado,
       itens,
       totalItens,
       subtotal,
@@ -1226,6 +1348,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       bairrosEntrega,
       horarioFuncionamento,
       horarioCarregando,
+      horarioErro,
       slotsDisponiveis,
       agendamento,
       definirAgendamento,
@@ -1245,6 +1368,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       removerEnderecoNomeado,
       historicoPedidos,
       historicoPedidosCarregando,
+      historicoPedidosErro,
       carregarHistoricoPedidos,
       adicionar,
       remover,
@@ -1272,6 +1396,11 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
     [
       produtos,
       produtosLoading,
+      produtosErro,
+      carrinhoRestaurado,
+      quantidadeItensSalvos,
+      pedidoRecuperado,
+      descartarPedidoRecuperado,
       itens,
       totalItens,
       subtotal,
@@ -1295,6 +1424,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       bairrosEntrega,
       horarioFuncionamento,
       horarioCarregando,
+      horarioErro,
       slotsDisponiveis,
       agendamento,
       definirAgendamento,
@@ -1314,6 +1444,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       removerEnderecoNomeado,
       historicoPedidos,
       historicoPedidosCarregando,
+      historicoPedidosErro,
       carregarHistoricoPedidos,
       adicionar,
       remover,

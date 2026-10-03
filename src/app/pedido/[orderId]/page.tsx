@@ -9,6 +9,8 @@ import { useAuth } from "../../../hooks/useAuth";
 import { STATUS_PEDIDO_NAO_ENTREGUE } from "../../../contexts/CarrinhoContext";
 import SolicitarAlteracaoModal from "../../../components/SolicitarAlteracaoModal";
 import BotaoLocalizacao from "../../../components/BotaoLocalizacao";
+import LoginSheet from "../../../components/LoginSheet";
+import { codigoErro, ouvirComReconexao, useOffline } from "../../../lib/rede";
 
 interface PedidoStatus {
   status: number;
@@ -35,6 +37,36 @@ interface PedidoStatus {
   complemento_destinatario?: string;
   bairro_destinatario?: string;
   referencia?: string;
+}
+
+// Cópia local do PIX deste pedido: se a página for recarregada sem internet
+// (e o cache do Firestore não estiver disponível no navegador), o cliente
+// ainda consegue ver o QR e o copia-e-cola para pagar.
+interface PixSalvo {
+  qrcode?: string;
+  copiaCola?: string;
+}
+
+function chavePix(orderId: string) {
+  return `fabrica_pix_${orderId}`;
+}
+
+function lerPixSalvo(orderId: string): PixSalvo | null {
+  try {
+    const bruto = window.localStorage.getItem(chavePix(orderId));
+    return bruto ? (JSON.parse(bruto) as PixSalvo) : null;
+  } catch {
+    return null;
+  }
+}
+
+function salvarPix(orderId: string, pix: PixSalvo | null) {
+  try {
+    if (pix) window.localStorage.setItem(chavePix(orderId), JSON.stringify(pix));
+    else window.localStorage.removeItem(chavePix(orderId));
+  } catch {
+    // Storage indisponível: sem cópia local, só o que vier do servidor.
+  }
 }
 
 function formatarReal(valor: number) {
@@ -90,35 +122,85 @@ export default function PedidoPage() {
   const [pedido, setPedido] = useState<PedidoStatus | null>(null);
   const [carregando, setCarregando] = useState(true);
   const [naoEncontrado, setNaoEncontrado] = useState(false);
+  // Dados exibidos vieram do cache do aparelho (sem confirmação do servidor
+  // ainda) ou o listener caiu e está tentando reconectar.
+  const [doCache, setDoCache] = useState(false);
+  const [erroConexao, setErroConexao] = useState(false);
   const [copiado, setCopiado] = useState(false);
+  const [falhaCopiar, setFalhaCopiar] = useState(false);
   const [mostrarAlteracao, setMostrarAlteracao] = useState(false);
+  const [mostrarLogin, setMostrarLogin] = useState(false);
+  const [pixSalvo, setPixSalvo] = useState<PixSalvo | null>(null);
+  const offline = useOffline();
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- leitura única de um storage externo (localStorage) depois do mount.
+    setPixSalvo(lerPixSalvo(params.orderId));
+  }, [params.orderId]);
 
   useEffect(() => {
     if (authLoading || !user) return;
 
-    const unsubscribe = onSnapshot(
-      doc(db, "pedidos", params.orderId),
-      (snap) => {
-        if (!snap.exists()) {
+    // Reassina sozinho se o listener morrer com erro (ver ouvirComReconexao);
+    // queda simples de internet o próprio Firestore já reconecta.
+    return ouvirComReconexao(
+      (aoErro) =>
+        onSnapshot(
+          doc(db, "pedidos", params.orderId),
+          { includeMetadataChanges: true },
+          (snap) => {
+            const veioDoCache = snap.metadata.fromCache;
+            setDoCache(veioDoCache);
+            setErroConexao(false);
+            if (!snap.exists()) {
+              // "Não existe" vindo só do cache pode ser apenas falta de
+              // internet — espera a resposta do servidor antes de afirmar.
+              if (!veioDoCache) {
+                setNaoEncontrado(true);
+                setCarregando(false);
+              }
+              return;
+            }
+            const dados = snap.data() as PedidoStatus;
+            setNaoEncontrado(false);
+            setPedido(dados);
+            setCarregando(false);
+            if (dados.pix_qrcode_base64 || dados.pix_copia_cola) {
+              salvarPix(params.orderId, { qrcode: dados.pix_qrcode_base64, copiaCola: dados.pix_copia_cola });
+            } else if (dados.pix_confirmado) {
+              salvarPix(params.orderId, null);
+            }
+          },
+          aoErro
+        ),
+      (erro, vaiTentarDeNovo) => {
+        // Sem permissão = pedido de outra conta (ou inexistente). Qualquer
+        // outro erro é conexão: mantém o que já está na tela e avisa.
+        if (codigoErro(erro) === "permission-denied" && !vaiTentarDeNovo) {
           setNaoEncontrado(true);
         } else {
-          setPedido(snap.data() as PedidoStatus);
+          setErroConexao(true);
         }
-        setCarregando(false);
-      },
-      () => {
-        setNaoEncontrado(true);
         setCarregando(false);
       }
     );
-    return () => unsubscribe();
   }, [authLoading, user, params.orderId]);
 
+  const codigoPix = pedido?.pix_copia_cola ?? pixSalvo?.copiaCola;
+  const qrcodePix = pedido?.pix_qrcode_base64 ?? pixSalvo?.qrcode;
+
   const copiarCodigo = async () => {
-    if (!pedido?.pix_copia_cola) return;
-    await navigator.clipboard.writeText(pedido.pix_copia_cola);
-    setCopiado(true);
-    setTimeout(() => setCopiado(false), 2000);
+    if (!codigoPix) return;
+    try {
+      await navigator.clipboard.writeText(codigoPix);
+      setCopiado(true);
+      setFalhaCopiar(false);
+      setTimeout(() => setCopiado(false), 2000);
+    } catch {
+      // Alguns navegadores bloqueiam a área de transferência: mostra o
+      // código selecionável para copiar manualmente.
+      setFalhaCopiar(true);
+    }
   };
 
   const ehPix = pedido?.forma_pagamento?.[0] === "17";
@@ -157,8 +239,60 @@ export default function PedidoPage() {
       </header>
 
       <main className="w-full max-w-md mx-auto px-4 pt-6 pb-16 flex flex-col gap-6">
-        {carregando || authLoading ? (
-          <p className="text-blue-600 font-semibold text-center py-16">A carregar...</p>
+        {user && !naoEncontrado && (offline || erroConexao || (doCache && pedido)) && (
+          <p role="status" className="text-xs font-medium text-amber-800 bg-amber-50 border border-amber-100 rounded-xl px-3 py-2">
+            {offline || erroConexao
+              ? "Sem conexão. Mostrando a última informação recebida. Atualizamos sozinhos quando a internet voltar."
+              : "Conectando para atualizar o status do pedido..."}
+          </p>
+        )}
+        {!authLoading && !user ? (
+          <div className="text-center py-16">
+            <p className="text-neutral-600 mb-4">Entre com seu WhatsApp para acompanhar este pedido.</p>
+            <button
+              type="button"
+              onClick={() => setMostrarLogin(true)}
+              className="bg-color-primary text-white font-bold text-sm px-6 py-3 rounded-full"
+            >
+              Entrar
+            </button>
+          </div>
+        ) : (carregando || authLoading || erroConexao) && !pedido && !naoEncontrado ? (
+          codigoPix && (offline || erroConexao) ? (
+            <div className="bg-white rounded-2xl shadow-sm border border-neutral-100 p-6 text-center">
+              <h2 className="font-bold text-black mb-1">Código PIX deste pedido</h2>
+              <p className="text-sm text-neutral-500 mb-4">
+                Sem conexão para ver o status agora. Se ainda não pagou, use o código salvo abaixo.
+              </p>
+              {qrcodePix && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={`data:image/png;base64,${qrcodePix}`}
+                  alt="QR code PIX"
+                  className="w-48 h-48 mx-auto rounded-xl border border-neutral-100"
+                />
+              )}
+              <button
+                onClick={copiarCodigo}
+                className="mt-4 w-full bg-blue-50 text-blue-700 font-semibold text-sm py-3 rounded-xl hover:bg-blue-100 transition"
+              >
+                {copiado ? "Código copiado!" : "Copiar código PIX"}
+              </button>
+              {falhaCopiar && (
+                <textarea
+                  readOnly
+                  value={codigoPix}
+                  onFocus={(e) => e.currentTarget.select()}
+                  className="mt-3 w-full text-xs text-neutral-700 bg-neutral-50 border border-neutral-200 rounded-lg p-2 break-all"
+                  rows={4}
+                />
+              )}
+            </div>
+          ) : (
+            <p className="text-blue-600 font-semibold text-center py-16">
+              {offline || erroConexao ? "Sem conexão. Tentando carregar seu pedido..." : "Carregando..."}
+            </p>
+          )
         ) : naoEncontrado || !pedido ? (
           <div className="text-center py-16">
             <p className="text-neutral-500 mb-4">Não encontramos esse pedido.</p>
@@ -200,22 +334,38 @@ export default function PedidoPage() {
                     Escaneie o QR code ou copie o código abaixo no app do seu banco.
                   </p>
 
-                  {pedido.pix_qrcode_base64 && (
+                  {!qrcodePix && !codigoPix && (
+                    <p className="text-sm text-neutral-500 py-6">Gerando o código PIX...</p>
+                  )}
+
+                  {qrcodePix && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={`data:image/png;base64,${pedido.pix_qrcode_base64}`}
+                      src={`data:image/png;base64,${qrcodePix}`}
                       alt="QR code PIX"
                       className="w-48 h-48 mx-auto rounded-xl border border-neutral-100"
                     />
                   )}
 
-                  {pedido.pix_copia_cola && (
+                  {codigoPix && (
                     <button
                       onClick={copiarCodigo}
                       className="mt-4 w-full bg-blue-50 text-blue-700 font-semibold text-sm py-3 rounded-xl hover:bg-blue-100 transition break-all"
                     >
                       {copiado ? "Código copiado!" : "Copiar código PIX"}
                     </button>
+                  )}
+                  {codigoPix && falhaCopiar && (
+                    <>
+                      <p className="mt-3 text-xs text-neutral-500">Não foi possível copiar automaticamente. Toque no código e copie:</p>
+                      <textarea
+                        readOnly
+                        value={codigoPix}
+                        onFocus={(e) => e.currentTarget.select()}
+                        className="mt-1 w-full text-xs text-neutral-700 bg-neutral-50 border border-neutral-200 rounded-lg p-2 break-all"
+                        rows={4}
+                      />
+                    </>
                   )}
                 </div>
 
@@ -342,6 +492,13 @@ export default function PedidoPage() {
           </>
         )}
       </main>
+
+      {mostrarLogin && (
+        <LoginSheet
+          subtitulo="Informe o WhatsApp usado no pedido."
+          onClose={() => setMostrarLogin(false)}
+        />
+      )}
 
       {podeAlterar && mostrarAlteracao && pedido && (
         <SolicitarAlteracaoModal

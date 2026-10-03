@@ -14,7 +14,23 @@ type Passo = 1 | 2 | 3;
 export default function CarrinhoPage() {
   const router = useRouter();
   const carrinho = useCarrinho();
-  const { itens, totalItens, limparCarrinho, finalizarPedido } = carrinho;
+  const {
+    itens,
+    totalItens,
+    limparCarrinho,
+    finalizarPedido,
+    carrinhoRestaurado,
+    quantidadeItensSalvos,
+    produtosLoading,
+    produtosErro,
+    pedidoRecuperado,
+    descartarPedidoRecuperado,
+  } = carrinho;
+  // Itens salvos neste aparelho cujos produtos ainda não chegaram (cardápio
+  // carregando numa rede lenta): mostrar "carrinho vazio" aqui fazia parecer
+  // que o carrinho tinha se perdido.
+  const aguardandoCarrinho =
+    itens.length === 0 && (!carrinhoRestaurado || (quantidadeItensSalvos > 0 && (produtosLoading || produtosErro)));
 
   const [passo, setPasso] = useState<Passo>(1);
 
@@ -64,7 +80,38 @@ export default function CarrinhoPage() {
       </header>
 
       <main className="w-full max-w-2xl mx-auto px-4 pt-6 pb-28">
-        {itens.length === 0 ? (
+        {pedidoRecuperado && (
+          <div role="status" className="mb-5 rounded-2xl border border-green-100 bg-green-50 p-4 text-green-900">
+            <p className="font-bold">Seu pedido anterior foi confirmado</p>
+            <p className="mt-1 text-sm opacity-80">
+              A internet caiu antes de a confirmação chegar, mas o pedido foi recebido pela loja. Não precisa pedir de novo.
+            </p>
+            <div className="mt-3 flex gap-3">
+              <Link
+                href={`/pedido/${pedidoRecuperado}`}
+                onClick={descartarPedidoRecuperado}
+                className="rounded-full bg-green-700 px-4 py-2 text-sm font-semibold text-white"
+              >
+                Ver pedido
+              </Link>
+              <button type="button" onClick={descartarPedidoRecuperado} className="text-sm font-semibold underline">
+                Fechar
+              </button>
+            </div>
+          </div>
+        )}
+        {aguardandoCarrinho ? (
+          <div className="text-center py-16 text-neutral-500" role="status">
+            {produtosErro ? (
+              <>
+                <p className="font-semibold text-neutral-700">Não conseguimos carregar o cardápio agora.</p>
+                <p className="mt-1 text-sm">Seus itens continuam salvos. Estamos tentando de novo, confira sua internet.</p>
+              </>
+            ) : (
+              <p>Carregando seu carrinho...</p>
+            )}
+          </div>
+        ) : itens.length === 0 ? (
           <div className="text-center py-16 text-neutral-500">
             <p className="mb-4">Seu carrinho está vazio.</p>
             <Link href="/cardapio" className="text-blue-600 font-semibold hover:underline">
@@ -123,6 +170,7 @@ export default function CarrinhoPage() {
             aplicarCupom={carrinho.aplicarCupom}
             removerCupom={carrinho.removerCupom}
             horarioCarregando={carrinho.horarioCarregando}
+            horarioErro={carrinho.horarioErro}
             slotsDisponiveis={carrinho.slotsDisponiveis}
             agendamento={carrinho.agendamento}
             definirAgendamento={carrinho.definirAgendamento}

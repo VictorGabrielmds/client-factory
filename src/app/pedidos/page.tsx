@@ -23,7 +23,7 @@ function statusTexto(status: number | null, tipoEntrega: "delivery" | "retirada"
 
 export default function PedidosPage() {
   const { user, loading } = useAuth();
-  const { historicoPedidos, historicoPedidosCarregando, carregarHistoricoPedidos } = useCarrinho();
+  const { historicoPedidos, historicoPedidosCarregando, historicoPedidosErro, carregarHistoricoPedidos } = useCarrinho();
 
   useEffect(() => {
     if (user) carregarHistoricoPedidos();
@@ -52,6 +52,18 @@ export default function PedidosPage() {
             <Link href="/cardapio" className="mt-2 w-full rounded-xl bg-blue-600 text-white font-semibold text-sm py-3 hover:bg-blue-700 transition">
               Voltar para o cardápio
             </Link>
+          </div>
+        ) : historicoPedidosErro && historicoPedidos.length === 0 ? (
+          <div role="alert" className="bg-white rounded-3xl shadow-sm border border-neutral-100 p-8 text-center flex flex-col items-center gap-3 mt-4">
+            <h2 className="text-lg font-bold text-black">Não conseguimos carregar seus pedidos</h2>
+            <p className="text-sm text-neutral-500">Confira sua internet e tente de novo.</p>
+            <button
+              type="button"
+              onClick={() => void carregarHistoricoPedidos()}
+              className="mt-2 w-full rounded-xl bg-blue-600 text-white font-semibold text-sm py-3 hover:bg-blue-700 transition"
+            >
+              Tentar de novo
+            </button>
           </div>
         ) : historicoPedidos.length === 0 ? (
           <div className="bg-white rounded-3xl shadow-sm border border-neutral-100 p-8 text-center flex flex-col items-center gap-3 mt-4">

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { collection, doc, onSnapshot, query, runTransaction, where } from "firebase/firestore";
 import { db } from "../lib/firebase-client";
+import { ouvirComReconexao } from "../lib/rede";
 import type { Produto } from "../types/produto";
 
 const PRODUTO_AGENDAMENTO_FRITURA_ID = "agendamento_fritura";
@@ -23,6 +24,7 @@ const PRODUTO_AGENDAMENTO_FRITURA_PADRAO = {
 export function useProdutos() {
   const [produtos, setProdutos] = useState<Produto[]>([]);
   const [loading, setLoading] = useState(true);
+  const [erro, setErro] = useState(false);
 
   useEffect(() => {
     const garantirProdutoAgendamento = async () => {
@@ -41,14 +43,27 @@ export function useProdutos() {
 
     void garantirProdutoAgendamento();
 
+    // Reassina sozinho se o listener morrer com erro (ver ouvirComReconexao).
     const q = query(collection(db, "produtos"), where("disponivel", "==", true));
-    const unsubscribe = onSnapshot(q, (snap) => {
-      const dados = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Produto);
-      setProdutos(dados);
-      setLoading(false);
-    });
-    return () => unsubscribe();
+    return ouvirComReconexao(
+      (aoErro) =>
+        onSnapshot(
+          q,
+          (snap) => {
+            const dados = snap.docs.map((d) => ({ id: d.id, ...d.data() }) as Produto);
+            setProdutos(dados);
+            setErro(false);
+            setLoading(false);
+          },
+          aoErro
+        ),
+      (err) => {
+        console.error("Erro ao ouvir produtos:", err);
+        setErro(true);
+        setLoading(false);
+      }
+    );
   }, []);
 
-  return { produtos, loading };
+  return { produtos, loading, erro };
 }

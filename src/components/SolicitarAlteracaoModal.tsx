@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { httpsCallable, FunctionsError } from "firebase/functions";
 import { functions } from "../lib/firebase-client";
+import { ehErroTransitorio, estaOffline } from "../lib/rede";
 import { useCarrinho } from "../contexts/CarrinhoContext";
 import type { Endereco, UltimoPedido } from "../contexts/CarrinhoContext";
 import BairroAutocomplete from "./BairroAutocomplete";
@@ -122,6 +123,15 @@ export default function SolicitarAlteracaoModal({ pedido, onClose }: SolicitarAl
   const [erroEnviar, setErroEnviar] = useState<string | null>(null);
   const [enviado, setEnviado] = useState(false);
 
+  // Mesma chave em todas as tentativas desta solicitação: se a resposta se
+  // perder (internet caiu) e o cliente tocar em Enviar de novo, o servidor
+  // reconhece o reenvio em vez de registrar a alteração duas vezes.
+  const idempotencyKey = useRef<string | null>(null);
+  // Mudou o conteúdo da solicitação: é um pedido de alteração novo.
+  useEffect(() => {
+    idempotencyKey.current = null;
+  }, [itensAdicionar, itensRemover, trocarEntrega, novoEndereco, observacoes]);
+
   const handleEnviar = async () => {
     if (enviando) return;
     setEnviando(true);
@@ -142,7 +152,7 @@ export default function SolicitarAlteracaoModal({ pedido, onClose }: SolicitarAl
 
       await chamar({
         orderId: pedido.orderId,
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: (idempotencyKey.current ??= crypto.randomUUID()),
         itensAdicionar: Object.entries(itensAdicionar).map(([produtoId, quantidade]) => ({ produtoId, quantidade })),
         itensRemoverIndices: [...itensRemover],
         trocarEntrega,
@@ -153,7 +163,11 @@ export default function SolicitarAlteracaoModal({ pedido, onClose }: SolicitarAl
       setEnviado(true);
     } catch (err) {
       setErroEnviar(
-        err instanceof FunctionsError ? err.message : "Não foi possível enviar sua solicitação. Tente novamente."
+        ehErroTransitorio(err) || estaOffline()
+          ? "Conexão instável. Não conseguimos confirmar o envio. Toque em Enviar de novo: não vai duplicar a solicitação."
+          : err instanceof FunctionsError
+            ? err.message
+            : "Não foi possível enviar sua solicitação. Tente novamente."
       );
     } finally {
       setEnviando(false);

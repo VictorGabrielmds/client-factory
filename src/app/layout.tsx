@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Caveat } from "next/font/google";
 import "./globals.css";
 import { CarrinhoProvider } from "../contexts/CarrinhoContext";
+import AvisoConexao from "../components/AvisoConexao";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -43,6 +44,7 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} ${caveat.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
+        <AvisoConexao />
         <CarrinhoProvider>{children}</CarrinhoProvider>
       </body>
     </html>

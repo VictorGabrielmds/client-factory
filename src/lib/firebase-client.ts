@@ -1,6 +1,12 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { initializeAppCheck, ReCaptchaV3Provider } from "firebase/app-check";
-import { getFirestore } from "firebase/firestore";
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  type Firestore,
+} from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 import { getFunctions } from "firebase/functions";
 
@@ -40,7 +46,24 @@ if (typeof window !== "undefined" && process.env.NEXT_PUBLIC_RECAPTCHA_SITE_KEY)
   });
 }
 
-const db = getFirestore(app);
+// Cache persistente (IndexedDB) no navegador: com internet ruim ou caindo,
+// cardápio e acompanhamento do pedido (incluindo o QR/copia-e-cola do PIX)
+// continuam aparecendo a partir da última versão recebida, inclusive depois
+// de recarregar a página. O servidor continua validando tudo em criarPedido.
+// No SSR, ou se o navegador não deixar usar IndexedDB, cai no cache em memória.
+function criarFirestore(): Firestore {
+  if (typeof window === "undefined") return getFirestore(app);
+  try {
+    return initializeFirestore(app, {
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    });
+  } catch {
+    // Já inicializado (hot reload) ou IndexedDB indisponível.
+    return getFirestore(app);
+  }
+}
+
+const db = criarFirestore();
 const auth = getAuth(app);
 const functions = getFunctions(app, "southamerica-east1");
 

@@ -68,6 +68,7 @@ interface PassoResumoProps {
   removerCupom: () => void;
 
   horarioCarregando: boolean;
+  horarioErro: boolean;
   slotsDisponiveis: SlotAgendamento[];
   agendamento: SlotAgendamento | null;
   definirAgendamento: (slot: SlotAgendamento) => void;
@@ -116,6 +117,7 @@ export default function PassoResumo({
   aplicarCupom,
   removerCupom,
   horarioCarregando,
+  horarioErro,
   slotsDisponiveis,
   agendamento,
   definirAgendamento,
@@ -325,6 +327,10 @@ export default function PassoResumo({
         )}
         {horarioCarregando ? (
           <p className="text-xs text-neutral-400">Carregando horários disponíveis...</p>
+        ) : horarioErro && slotsDisponiveis.length === 0 ? (
+          <p className="text-xs text-amber-700">
+            Não conseguimos carregar os horários (conexão instável). Estamos tentando de novo automaticamente.
+          </p>
         ) : slotsDisponiveis.length === 0 ? (
           <p className="text-xs text-amber-600">
             Nenhum horário disponível pra {tipoEntrega === "delivery" ? "delivery" : "retirada"} no momento.
