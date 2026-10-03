@@ -19,6 +19,7 @@ interface PedidoStatus {
   valor_itens: number;
   valor_desconto: number;
   valor_taxa: number;
+  valor_taxa_cartao?: number;
   valor_venda: number;
   descricao_item: string[];
   quantidade_item: number[];
@@ -449,6 +450,12 @@ export default function PedidoPage() {
                   <div className="flex items-center justify-between text-neutral-600">
                     <span>Taxa de entrega</span>
                     <span>{formatarReal(pedido.valor_taxa)}</span>
+                  </div>
+                )}
+                {(pedido.valor_taxa_cartao ?? 0) > 0 && (
+                  <div className="flex items-center justify-between text-neutral-600">
+                    <span>Taxa do cartão</span>
+                    <span>{formatarReal(pedido.valor_taxa_cartao ?? 0)}</span>
                   </div>
                 )}
                 <div className="flex items-center justify-between text-lg font-extrabold text-blue-600 pt-2 mt-1 border-t border-neutral-100">

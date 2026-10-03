@@ -4,6 +4,7 @@ import Image from "next/image";
 import type { ItemCarrinho } from "../../contexts/CarrinhoContext";
 import { formatarReal } from "./format";
 import QuantidadeInput from "../QuantidadeInput";
+import AvisoEsgotados from "./AvisoEsgotados";
 
 interface PassoItensProps {
   itens: ItemCarrinho[];
@@ -28,6 +29,7 @@ export default function PassoItens({
   onEsvaziar,
   onContinuar,
 }: PassoItensProps) {
+  const temEsgotado = itens.some((item) => item.produto.esgotado);
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-end justify-between">
@@ -42,6 +44,8 @@ export default function PassoItens({
           Esvaziar carrinho
         </button>
       </div>
+
+      <AvisoEsgotados />
 
       <section className="flex flex-col gap-3">
         {itens.map(({ produto, quantidade }) => (
@@ -66,7 +70,11 @@ export default function PassoItens({
 
             <div className="flex-1 min-w-0">
               <h3 className="font-semibold text-black truncate">{produto.nome}</h3>
-              <span className="text-sm text-neutral-500">{formatarReal(produto.preco)} cada</span>
+              {produto.esgotado ? (
+                <span className="text-sm font-semibold text-red-600">Esgotado</span>
+              ) : (
+                <span className="text-sm text-neutral-500">{formatarReal(produto.preco)} cada</span>
+              )}
             </div>
 
             <div className="shrink-0 flex flex-col items-end gap-2">
@@ -90,8 +98,9 @@ export default function PassoItens({
                 />
                 <button
                   onClick={() => adicionar(produto.id)}
+                  disabled={produto.esgotado}
                   aria-label={`Adicionar uma unidade de ${produto.nome}`}
-                  className="w-7 h-7 flex items-center justify-center rounded-full bg-white text-blue-600 font-bold shadow-sm hover:bg-blue-100 transition"
+                  className="w-7 h-7 flex items-center justify-center rounded-full bg-white text-blue-600 font-bold shadow-sm hover:bg-blue-100 disabled:opacity-30 transition"
                 >
                   +
                 </button>
@@ -131,10 +140,10 @@ export default function PassoItens({
           </div>
           <button
             onClick={onContinuar}
-            disabled={itens.length === 0}
+            disabled={itens.length === 0 || temEsgotado}
             className="flex-1 bg-color-primary text-white font-bold text-base py-3.5 rounded-full shadow-lg hover:bg-neutral-800 disabled:opacity-40 disabled:cursor-not-allowed transition active:scale-[0.98]"
           >
-            Continuar
+            {temEsgotado ? "Remova os itens esgotados" : "Continuar"}
           </button>
         </div>
       </div>

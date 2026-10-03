@@ -56,7 +56,10 @@ export default function CarrinhoResumo() {
             <div className="flex flex-col gap-3 mb-5">
               {itens.map(({ produto, quantidade }) => (
                 <div key={produto.id} className="flex items-center gap-3">
-                  <span className="flex-1 text-sm text-black truncate">{produto.nome}</span>
+                  <span className="flex-1 text-sm text-black truncate">
+                    {produto.nome}
+                    {produto.esgotado && <span className="ml-1.5 text-xs font-semibold text-red-600">Esgotado</span>}
+                  </span>
                   <div className="flex items-center gap-2 bg-blue-50 rounded-full px-1.5 py-1 shrink-0">
                     <button
                       onClick={() => remover(produto.id)}
@@ -68,8 +71,9 @@ export default function CarrinhoResumo() {
                     <span className="w-4 text-center text-xs font-bold text-black">{quantidade}</span>
                     <button
                       onClick={() => adicionar(produto.id)}
+                      disabled={produto.esgotado}
                       aria-label={`Adicionar uma unidade de ${produto.nome}`}
-                      className="w-6 h-6 flex items-center justify-center rounded-full bg-white text-blue-600 font-bold text-xs shadow-sm"
+                      className="w-6 h-6 flex items-center justify-center rounded-full bg-white text-blue-600 font-bold text-xs shadow-sm disabled:opacity-30"
                     >
                       +
                     </button>

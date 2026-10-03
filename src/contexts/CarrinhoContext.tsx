@@ -31,6 +31,9 @@ const VALIDADE_CHECKOUT_PENDENTE_MS = 48 * 60 * 60 * 1000;
 const TIMEOUT_CRIAR_PEDIDO_MS = 35000;
 const TIMEOUT_CONSULTA_MS = 15000;
 
+const MENSAGEM_PEDIDO_ANTERIOR =
+  "Seu pedido anterior, feito antes de você mudar o carrinho, foi confirmado. Confira esse pedido (link no topo) antes de finalizar outro.";
+
 // Colchão de tempo entre escolher um horário e apertar "Finalizar" — sem
 // isso, o primeiro horário da lista pode deixar de valer só pelo tempo que
 // o cliente leva preenchendo o resto do checkout (o servidor valida contra o
@@ -364,6 +367,10 @@ interface CarrinhoContextValue {
   descartarPedidoRecuperado: () => void;
 
   itens: ItemCarrinho[];
+  // Itens do carrinho que ficaram esgotados depois de adicionados — o
+  // checkout fica travado até eles saírem (o servidor não recusa sozinho).
+  itensEsgotados: ItemCarrinho[];
+  removerEsgotados: () => void;
   totalItens: number;
   subtotal: number;
   desconto: number;
@@ -983,9 +990,9 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
     let adicionados = 0;
     let indisponiveis = 0;
     ultimoPedido.produtoIdItem.forEach((produtoId, i) => {
-      const existe = produtos.some((p) => p.id === produtoId);
+      const produto = produtos.find((p) => p.id === produtoId);
       const quantidade = ultimoPedido.quantidadeItem[i] ?? 1;
-      if (existe && quantidade > 0) {
+      if (produto && !produto.esgotado && !produto.itemSistema && quantidade > 0) {
         definirQuantidade(produtoId, quantidade);
         adicionados++;
       } else {
@@ -999,11 +1006,15 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
     ultimoPedido?.status != null && STATUS_PEDIDO_NAO_ENTREGUE.has(ultimoPedido.status);
 
   const adicionar = useCallback((produtoId: string) => {
+    // Esgotado não entra no carrinho por nenhum caminho (cardápio, botão +
+    // no carrinho), não só pela ausência do botão na tela.
+    const produto = produtos.find((p) => p.id === produtoId);
+    if (produto?.esgotado || produto?.itemSistema) return;
     setQuantidades((atual) => ({
       ...atual,
       [produtoId]: Math.min((atual[produtoId] ?? 0) + 1, 100),
     }));
-  }, []);
+  }, [produtos]);
 
   const remover = useCallback((produtoId: string) => {
     setQuantidades((atual) => {
@@ -1033,10 +1044,22 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
     return Object.entries(quantidades)
       .map(([produtoId, quantidade]) => {
         const produto = produtos.find((p) => p.id === produtoId);
-        return produto ? { produto, quantidade } : null;
+        // Item de sistema (ex.: "Agendar fritura", preço 0) tem fluxo
+        // próprio e nunca é vendido pelo carrinho.
+        return produto && !produto.itemSistema ? { produto, quantidade } : null;
       })
       .filter((item): item is ItemCarrinho => item !== null);
   }, [quantidades, produtos]);
+
+  const itensEsgotados = useMemo(() => itens.filter((item) => item.produto.esgotado), [itens]);
+
+  const removerEsgotados = useCallback(() => {
+    setQuantidades((atual) => {
+      const copia = { ...atual };
+      for (const item of itensEsgotados) delete copia[item.produto.id];
+      return copia;
+    });
+  }, [itensEsgotados]);
 
   const totalItens = itens.reduce((soma, item) => soma + item.quantidade, 0);
   const subtotal = itens.reduce((soma, item) => soma + item.quantidade * item.produto.preco, 0);
@@ -1158,7 +1181,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
   const consultarCheckout = useCallback(async (idempotencyKey: string) => {
     const consultar = httpsCallable<
       { idempotencyKey: string },
-      { estado: string; resultado?: ResultadoCheckout }
+      { estado: string; resultado?: ResultadoCheckout; pedidoId?: string | null }
     >(functions, "consultarCheckoutPedido", { timeout: TIMEOUT_CONSULTA_MS });
     const status = await comRetentativa(() => consultar({ idempotencyKey }));
     return status.data;
@@ -1183,7 +1206,15 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       .then((dados) => {
         // Uma finalização em andamento cuida da própria tentativa.
         if (finalizandoRef.current) return;
-        if (dados.estado === "concluido" && dados.resultado?.orderId) {
+        // "recuperando_pix": o pedido já existe, só o QR ainda está sendo
+        // gerado pelo servidor — também conta como pedido feito.
+        const orderIdRecuperado =
+          dados.estado === "concluido"
+            ? dados.resultado?.orderId
+            : dados.estado === "recuperando_pix"
+              ? dados.pedidoId
+              : null;
+        if (orderIdRecuperado) {
           // Só esvazia o carrinho se ele ainda for o mesmo do pedido criado
           // — se a pessoa já mexeu nos itens, mantém o que ela montou.
           const itensPendentes = tentativa.payload.itens;
@@ -1197,7 +1228,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
             limparCheckoutPendente();
             checkoutPendenteRef.current = null;
           }
-          setPedidoRecuperado(dados.resultado.orderId);
+          setPedidoRecuperado(orderIdRecuperado);
         } else if (dados.estado === "falhou" || dados.estado === "nao_encontrado") {
           limparCheckoutPendente();
           checkoutPendenteRef.current = null;
@@ -1216,6 +1247,14 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
 
   const finalizarPedido = useCallback(async () => {
     if (!user || !formaPagamento || itens.length === 0 || !agendamento) return null;
+    if (itensEsgotados.length > 0) {
+      setErroFinalizar(
+        `${itensEsgotados.map((item) => item.produto.nome).join(", ")} ${
+          itensEsgotados.length === 1 ? "esgotou" : "esgotaram"
+        }. Remova do carrinho para finalizar.`
+      );
+      return null;
+    }
     if (tipoEntrega === "delivery" && (taxaEntregaCarregando || taxaEntregaErro || !endereco.bairro.trim())) {
       setErroFinalizar(taxaEntregaErro || "Aguarde o cálculo do frete antes de confirmar o pedido.");
       return null;
@@ -1249,16 +1288,39 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
         checkoutPendenteRef.current ??
         lerCheckoutPendente(user.uid);
 
+      // true quando a tentativa pendente tem outro conteúdo (a pessoa mexeu
+      // no carrinho depois de uma falha). Ela ainda é reenviada como está —
+      // é o que o servidor tem registrado e é o único jeito de resolvê-la —,
+      // mas o resultado não é tratado como o pedido do carrinho atual.
+      let tentativaAntiga = false;
+
       if (tentativa) {
         const status = await consultarCheckout(tentativa.idempotencyKey);
         if (status.estado === "concluido" && status.resultado?.orderId) {
           concluirCheckout();
           return { orderId: status.resultado.orderId };
         }
+        if (status.estado === "recuperando_pix" && status.pedidoId) {
+          // Pedido já criado, só o QR do PIX ainda está sendo gerado pelo
+          // servidor: leva pra tela do pedido, que mostra "Gerando o código
+          // PIX..." e atualiza sozinha. Se o carrinho mudou desde então, só
+          // avisa e mantém o carrinho atual.
+          if (JSON.stringify(tentativa.payload) !== JSON.stringify(payloadAtual)) {
+            limparCheckoutPendente();
+            checkoutPendenteRef.current = null;
+            setPedidoRecuperado(status.pedidoId);
+            setErroFinalizar(MENSAGEM_PEDIDO_ANTERIOR);
+            return null;
+          }
+          concluirCheckout();
+          return { orderId: status.pedidoId };
+        }
         if (status.estado === "falhou" || status.estado === "nao_encontrado") {
           limparCheckoutPendente();
           checkoutPendenteRef.current = null;
           tentativa = null;
+        } else {
+          tentativaAntiga = JSON.stringify(tentativa.payload) !== JSON.stringify(payloadAtual);
         }
       }
 
@@ -1295,7 +1357,31 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
           if (!CODIGOS_TRANSITORIOS.has(codigo)) break;
         }
       }
-      if (!resultado) throw ultimoErro;
+      if (!resultado) {
+        // O pedido pode já existir com o PIX ainda sendo gerado (o servidor
+        // responde "unavailable" nesse caso). Em vez de só mostrar erro e
+        // deixar o carrinho cheio, confere e leva pro pedido.
+        try {
+          const status = await consultarCheckout(tentativa.idempotencyKey);
+          if (status.estado === "recuperando_pix" && status.pedidoId && !tentativaAntiga) {
+            concluirCheckout();
+            return { orderId: status.pedidoId };
+          }
+        } catch {
+          // Sem resposta: segue com o erro original abaixo.
+        }
+        throw ultimoErro;
+      }
+
+      if (tentativaAntiga) {
+        // Confirmou o pedido da tentativa anterior (com os itens de antes):
+        // avisa e deixa o carrinho atual intacto para a pessoa decidir.
+        limparCheckoutPendente();
+        checkoutPendenteRef.current = null;
+        setPedidoRecuperado(resultado.data.orderId);
+        setErroFinalizar(MENSAGEM_PEDIDO_ANTERIOR);
+        return null;
+      }
 
       concluirCheckout();
       return { orderId: resultado.data.orderId };
@@ -1306,7 +1392,7 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       setFinalizando(false);
       finalizandoRef.current = false;
     }
-  }, [user, formaPagamento, itens, observacoes, cupomAplicado, nome, cpf, tipoEntrega, endereco, agendamento, taxaEntregaCarregando, taxaEntregaErro, consultarCheckout, concluirCheckout]);
+  }, [user, formaPagamento, itens, observacoes, cupomAplicado, nome, cpf, tipoEntrega, endereco, agendamento, taxaEntregaCarregando, taxaEntregaErro, itensEsgotados, consultarCheckout, concluirCheckout]);
 
   const quantidadeItensSalvos = Object.keys(quantidades).length;
 
@@ -1325,6 +1411,8 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       pedidoRecuperado,
       descartarPedidoRecuperado,
       itens,
+      itensEsgotados,
+      removerEsgotados,
       totalItens,
       subtotal,
       desconto,
@@ -1402,6 +1490,8 @@ export function CarrinhoProvider({ children }: { children: ReactNode }) {
       pedidoRecuperado,
       descartarPedidoRecuperado,
       itens,
+      itensEsgotados,
+      removerEsgotados,
       totalItens,
       subtotal,
       desconto,

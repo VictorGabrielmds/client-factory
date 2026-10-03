@@ -13,6 +13,7 @@ import { formatarReal } from "./format";
 import { useAuth } from "../../hooks/useAuth";
 import LoginSheet from "../LoginSheet";
 import QuantidadeInput from "../QuantidadeInput";
+import AvisoEsgotados from "./AvisoEsgotados";
 
 function montarOpcoesPagamento(
   taxaDebitoPercentual: number,
@@ -143,6 +144,7 @@ export default function PassoResumo({
   const [confirmando, setConfirmando] = useState(false);
   const [mostrarLogin, setMostrarLogin] = useState(false);
 
+  const itensRef = useRef<HTMLDivElement>(null);
   const agendamentoRef = useRef<HTMLDivElement>(null);
   const entregaRef = useRef<HTMLDivElement>(null);
   const nomeRef = useRef<HTMLDivElement>(null);
@@ -153,6 +155,7 @@ export default function PassoResumo({
   const cpfPreenchido = cpfCnpjDigitos.length > 0;
   const cpfValido = cpfCnpjDigitos.length === 11 || cpfCnpjDigitos.length === 14;
   const freteBloqueando = tipoEntrega === "delivery" && (taxaEntregaCarregando || !!taxaEntregaErro);
+  const temEsgotado = itens.some((item) => item.produto.esgotado);
   const podeFinalizar =
     !!nome.trim() &&
     !!formaPagamento &&
@@ -161,6 +164,7 @@ export default function PassoResumo({
     faltaParaValorMinimo <= 0 &&
     !!agendamento &&
     !freteBloqueando &&
+    !temEsgotado &&
     !finalizando;
 
   const localEntrega = useMemo(() => {
@@ -190,7 +194,9 @@ export default function PassoResumo({
       // abaixo do mínimo com todo o resto preenchido travava o botão SEM
       // nenhum feedback — clicar em "Finalizar" não fazia absolutamente nada,
       // porque não havia pra onde rolar.
-      const primeiroErro = faltaParaValorMinimo > 0 || freteBloqueando
+      const primeiroErro = temEsgotado
+        ? itensRef
+        : faltaParaValorMinimo > 0 || freteBloqueando
         ? entregaRef
         : !agendamento
           ? agendamentoRef
@@ -231,13 +237,18 @@ export default function PassoResumo({
         <h2 className="text-2xl font-extrabold tracking-tight text-black">Resumo do pedido</h2>
       </div>
 
+      <AvisoEsgotados />
+
       {/* ITENS — editável direto aqui */}
-      <section className="bg-white rounded-2xl shadow-sm border border-neutral-100 p-4">
+      <section ref={itensRef} className="bg-white rounded-2xl shadow-sm border border-neutral-100 p-4">
         <h3 className="text-sm font-semibold text-black mb-3">Itens</h3>
         <div className="flex flex-col gap-3">
           {itens.map(({ produto, quantidade }) => (
             <div key={produto.id} className="flex items-center gap-3">
-              <span className="flex-1 text-sm text-neutral-700 truncate">{produto.nome}</span>
+              <span className="flex-1 text-sm text-neutral-700 truncate">
+                {produto.nome}
+                {produto.esgotado && <span className="ml-1.5 text-xs font-semibold text-red-600">Esgotado</span>}
+              </span>
               <div className="flex items-center gap-2 bg-neutral-100 rounded-full px-1.5 py-1 shrink-0">
                 <button
                   onClick={() => remover(produto.id)}
@@ -255,8 +266,9 @@ export default function PassoResumo({
                 />
                 <button
                   onClick={() => adicionar(produto.id)}
+                  disabled={produto.esgotado}
                   aria-label={`Adicionar uma unidade de ${produto.nome}`}
-                  className="w-6 h-6 flex items-center justify-center rounded-full bg-white text-blue-600 font-bold text-xs shadow-sm hover:bg-blue-50 transition"
+                  className="w-6 h-6 flex items-center justify-center rounded-full bg-white text-blue-600 font-bold text-xs shadow-sm hover:bg-blue-50 disabled:opacity-30 transition"
                 >
                   +
                 </button>
